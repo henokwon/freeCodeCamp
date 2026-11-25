@@ -59,7 +59,14 @@ function postChallenge(update) {
   } = update;
   const saveChallenge = postUpdate$(update).pipe(
     retry(3),
-    switchMap(({ data }) => {
+    switchMap(({ data, response }) => {
+      if (!response.ok) {
+        return of(
+          updateFailed(update),
+          createFlashMessage(data?.message ? data : standardErrorMessage),
+          submitChallengeError()
+        );
+      }
       const {
         type,
         completedDailyCodingChallenges,
@@ -94,18 +101,23 @@ function postChallenge(update) {
         type === 'error' ||
         (message && challengeType === challengeTypes.msTrophy)
       ) {
-        actions = [];
-        if (message) {
-          actions.push(createFlashMessage(data));
-        }
-        actions.push(submitChallengeError());
+        actions = [
+          createFlashMessage(message ? data : standardErrorMessage),
+          submitChallengeError()
+        ];
       } else if (challengeType === challengeTypes.msTrophy) {
         actions.push(createFlashMessage(msTrophyVerified));
       }
 
       return of(...actions);
     }),
-    catchError(() => of(updateFailed(update), submitChallengeError()))
+    catchError(() =>
+      of(
+        updateFailed(update),
+        createFlashMessage(standardErrorMessage),
+        submitChallengeError()
+      )
+    )
   );
   return saveChallenge;
 }
@@ -178,7 +190,11 @@ function submitProject(type, state) {
     payload: challengeInfo
   };
   return postChallenge(update, username).pipe(
-    concat(of(updateSolutionFormValues({})))
+    mergeMap(action =>
+      action.type === submitActionTypes.submitComplete
+        ? of(action, updateSolutionFormValues({}))
+        : of(action)
+    )
   );
 }
 
@@ -303,25 +319,33 @@ export default function completionEpic(action$, state$) {
         return donationData ? allowSectionDonationRequests(donationData) : null;
       };
 
+      const isSubmissionComplete = action =>
+        action.type === submitActionTypes.submitComplete ||
+        (!isSignedInSelector(state) &&
+          action.type === actionTypes.submitChallengeComplete);
+
       return submitter(type, state).pipe(
-        concat(
-          of(setIsAdvancing(!isLastChallengeInBlock), setIsProcessing(false))
-        ),
-        mergeMap(x => {
-          const donationAction = canAllowDonationRequest(state, x);
-          return donationAction ? of(x, donationAction) : of(x);
+        mergeMap(action => {
+          const actions = [action];
+          const donationAction = canAllowDonationRequest(state, action);
+          if (donationAction) actions.push(donationAction);
+          if (isSubmissionComplete(action)) {
+            actions.push(
+              setIsAdvancing(!isLastChallengeInBlock),
+              closeModal('completion')
+            );
+          }
+          return of(...actions);
         }),
-        mergeMap(x => of(x, setRenderStartTime(Date.now()))),
-        tap(res => {
-          if (res.type !== submitActionTypes.updateFailed) {
-            if (challengeType !== challengeTypes.exam) {
-              navigate(pathToNavigateTo);
-            }
-          } else {
-            createFlashMessage(standardErrorMessage);
+        tap(action => {
+          if (
+            isSubmissionComplete(action) &&
+            challengeType !== challengeTypes.exam
+          ) {
+            navigate(pathToNavigateTo);
           }
         }),
-        concat(of(closeModal('completion')))
+        concat(of(setIsProcessing(false), setRenderStartTime(Date.now())))
       );
     })
   );
